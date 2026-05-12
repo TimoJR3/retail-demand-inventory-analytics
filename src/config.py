@@ -9,18 +9,17 @@ INTERIM_DATA_DIR = DATA_DIR / "interim"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
 RESULTS_DIR = PROJECT_ROOT / "results"
 
-RAW_DATA_CANDIDATES = [
+RAW_FILE_CANDIDATES = [
     RAW_DATA_DIR / "online_retail_II.xlsx",
     RAW_DATA_DIR / "online_retail.xlsx",
     RAW_DATA_DIR / "online_retail_II.csv",
     RAW_DATA_DIR / "online_retail.csv",
 ]
 
-ID_COLUMNS = ["stock_code", "country"]
-TARGET_COLUMN = "sales"
-DATE_COLUMN = "date"
+# Алиас оставлен для старых ноутбуков проекта.
+RAW_DATA_CANDIDATES = RAW_FILE_CANDIDATES
 
-CANONICAL_COLUMNS = [
+REQUIRED_COLUMNS = [
     "invoice",
     "stock_code",
     "description",
@@ -30,3 +29,6 @@ CANONICAL_COLUMNS = [
     "customer_id",
     "country",
 ]
+
+MART_KEYS = ["sales_date", "stock_code", "market_id"]
+TARGET_COLUMN = "net_sales_qty"
