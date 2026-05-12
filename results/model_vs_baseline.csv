@@ -1,0 +1,3 @@
+source,metric,value
+model,wmape,0.7995855552959904
+median_by_weekday,wmape,0.857445521004722
