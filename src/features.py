@@ -1,81 +1,149 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
-def clean_transactions(
-    transactions: pd.DataFrame,
-    remove_returns: bool = True,
-    remove_missing_customer: bool = False,
-) -> pd.DataFrame:
-    result = transactions.copy()
-    result["invoice"] = result["invoice"].astype(str)
-    result["stock_code"] = result["stock_code"].astype(str)
-    result["description"] = result["description"].astype(str).str.strip()
-    result["country"] = result["country"].astype(str).str.strip()
-    result["invoice_date"] = pd.to_datetime(result["invoice_date"], errors="coerce")
-    result["quantity"] = pd.to_numeric(result["quantity"], errors="coerce")
-    result["unit_price"] = pd.to_numeric(result["unit_price"], errors="coerce")
-
-    result = result.dropna(subset=["invoice_date", "stock_code", "quantity", "unit_price"])
-    if remove_returns:
-        result = result[~result["invoice"].str.startswith("C", na=False)]
-        result = result[result["quantity"] > 0]
-    result = result[result["unit_price"] > 0]
-    if remove_missing_customer:
-        result = result.dropna(subset=["customer_id"])
-
-    result["date"] = result["invoice_date"].dt.floor("D")
-    result["revenue"] = result["quantity"] * result["unit_price"]
-    return result.reset_index(drop=True)
+KEY_COLUMNS = ["stock_code", "market_id"]
+DATE_COLUMN = "sales_date"
+TARGET_COLUMN = "net_sales_qty"
+REQUIRED_FEATURE_COLUMNS = [
+    "sales_date",
+    "stock_code",
+    "market_id",
+    "net_sales_qty",
+    "avg_unit_price",
+    "invoices_cnt",
+    "customers_cnt",
+]
 
 
-def build_daily_sales(transactions: pd.DataFrame, group_columns: list[str] | None = None) -> pd.DataFrame:
-    if group_columns is None:
-        group_columns = ["stock_code", "country"]
+def _validate_required_columns(df: pd.DataFrame, required_columns: list[str] | None = None) -> None:
+    required = required_columns or REQUIRED_FEATURE_COLUMNS
+    missing = sorted(set(required) - set(df.columns))
+    if missing:
+        raise ValueError("Для построения признаков не хватает колонок: " + ", ".join(missing))
 
-    frame = clean_transactions(transactions)
-    daily = (
-        frame.groupby(["date", *group_columns], as_index=False)
-        .agg(
-            sales=("quantity", "sum"),
-            revenue=("revenue", "sum"),
-            avg_unit_price=("unit_price", "mean"),
-            invoices=("invoice", "nunique"),
-            customers=("customer_id", "nunique"),
-        )
-        .sort_values(["date", *group_columns])
+
+def _sort_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    result[DATE_COLUMN] = pd.to_datetime(result[DATE_COLUMN])
+    return result.sort_values(KEY_COLUMNS + [DATE_COLUMN]).reset_index(drop=True)
+
+
+def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Добавляет лаги спроса внутри пары товар-рынок без использования будущих продаж."""
+    _validate_required_columns(df)
+    result = _sort_feature_frame(df)
+    grouped = result.groupby(KEY_COLUMNS, sort=False)
+
+    for lag in (7, 14, 28):
+        result[f"lag_{lag}"] = grouped[TARGET_COLUMN].shift(lag)
+
+    result["invoices_cnt_lag_7"] = grouped["invoices_cnt"].shift(7)
+    result["customers_cnt_lag_7"] = grouped["customers_cnt"].shift(7)
+    return result
+
+
+def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Добавляет скользящие признаки, рассчитанные только по прошлым дням."""
+    _validate_required_columns(df)
+    result = _sort_feature_frame(df)
+    grouped = result.groupby(KEY_COLUMNS, sort=False)[TARGET_COLUMN]
+
+    result["rolling_mean_7"] = grouped.transform(lambda values: values.shift(1).rolling(7, min_periods=1).mean())
+    result["rolling_mean_28"] = grouped.transform(lambda values: values.shift(1).rolling(28, min_periods=1).mean())
+    result["rolling_std_28"] = grouped.transform(lambda values: values.shift(1).rolling(28, min_periods=2).std())
+    result["rolling_median_28"] = grouped.transform(lambda values: values.shift(1).rolling(28, min_periods=1).median())
+    return result
+
+
+def add_price_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Добавляет лаг цены и изменение цены относительно значения 7 дней назад."""
+    _validate_required_columns(df)
+    result = _sort_feature_frame(df)
+    grouped = result.groupby(KEY_COLUMNS, sort=False)
+
+    result["avg_unit_price_lag_7"] = grouped["avg_unit_price"].shift(7)
+    result["price_change_abs"] = result["avg_unit_price"] - result["avg_unit_price_lag_7"]
+    result["price_change_pct"] = np.where(
+        result["avg_unit_price_lag_7"].abs() > 0,
+        result["price_change_abs"] / result["avg_unit_price_lag_7"],
+        np.nan,
     )
-    return daily
+    return result
 
 
-def add_calendar_features(frame: pd.DataFrame, date_column: str = "date") -> pd.DataFrame:
-    result = frame.copy()
-    dates = pd.to_datetime(result[date_column])
-    result["day_of_week"] = dates.dt.dayofweek
-    result["week_of_year"] = dates.dt.isocalendar().week.astype(int)
+def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Добавляет календарные признаки из даты продажи."""
+    _validate_required_columns(df, ["sales_date"])
+    result = df.copy()
+    dates = pd.to_datetime(result[DATE_COLUMN])
+    result["weekday"] = dates.dt.dayofweek
     result["month"] = dates.dt.month
     result["year"] = dates.dt.year
-    result["is_weekend"] = result["day_of_week"].isin([5, 6]).astype(int)
+    result["is_weekend"] = result["weekday"].isin([5, 6]).astype(int)
+    return result
+
+
+def add_zero_sales_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Добавляет признаки паузы в продажах, используя только историю до текущего дня."""
+    _validate_required_columns(df)
+    result = _sort_feature_frame(df)
+    result["days_since_last_sale"] = np.nan
+    result["zero_sales_streak"] = 0
+
+    for _, index in result.groupby(KEY_COLUMNS, sort=False).groups.items():
+        last_sale_date = None
+        zero_streak = 0
+        for row_index in index:
+            current_date = result.at[row_index, DATE_COLUMN]
+            current_sales = result.at[row_index, TARGET_COLUMN]
+
+            if last_sale_date is not None:
+                result.at[row_index, "days_since_last_sale"] = (current_date - last_sale_date).days
+            result.at[row_index, "zero_sales_streak"] = zero_streak
+
+            if pd.notna(current_sales) and current_sales > 0:
+                last_sale_date = current_date
+                zero_streak = 0
+            else:
+                zero_streak += 1
+
+    return result
+
+
+def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """Собирает полный набор признаков для витрины sales_date x stock_code x market_id."""
+    _validate_required_columns(df)
+    result = _sort_feature_frame(df)
+    result = add_calendar_features(result)
+    result = add_lag_features(result)
+    result = add_rolling_features(result)
+    result = add_price_features(result)
+    result = add_zero_sales_features(result)
     return result
 
 
 def add_lag_rolling_features(
     frame: pd.DataFrame,
-    group_columns: list[str],
-    target_column: str = "sales",
+    group_columns: list[str] | None = None,
+    target_column: str = TARGET_COLUMN,
     lags: tuple[int, ...] = (7, 14, 28),
     windows: tuple[int, ...] = (7, 28),
 ) -> pd.DataFrame:
-    result = frame.sort_values(group_columns + ["date"]).copy()
+    """Совместимый helper для старых ноутбуков: добавляет лаги и rolling без будущих значений."""
+    group_columns = group_columns or KEY_COLUMNS
+    date_column = DATE_COLUMN if DATE_COLUMN in frame.columns else "date"
+    result = frame.copy()
+    result[date_column] = pd.to_datetime(result[date_column])
+    result = result.sort_values(group_columns + [date_column]).reset_index(drop=True)
     grouped = result.groupby(group_columns, sort=False)[target_column]
 
     for lag in lags:
         result[f"lag_{lag}"] = grouped.shift(lag)
-
     for window in windows:
         result[f"rolling_mean_{window}"] = grouped.transform(
-            lambda series: series.shift(1).rolling(window=window, min_periods=1).mean()
+            lambda values: values.shift(1).rolling(window=window, min_periods=1).mean()
         )
-
     return result
