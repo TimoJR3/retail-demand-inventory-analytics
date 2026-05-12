@@ -13,38 +13,68 @@ def _to_arrays(y_true, y_pred) -> tuple[np.ndarray, np.ndarray]:
 
 
 def mae(y_true, y_pred) -> float:
+    """Считает среднюю абсолютную ошибку прогноза."""
     actual, forecast = _to_arrays(y_true, y_pred)
+    if actual.size == 0:
+        return 0.0
     return float(np.mean(np.abs(actual - forecast)))
 
 
 def rmse(y_true, y_pred) -> float:
+    """Считает корень из средней квадратичной ошибки прогноза."""
     actual, forecast = _to_arrays(y_true, y_pred)
+    if actual.size == 0:
+        return 0.0
     return float(np.sqrt(np.mean((actual - forecast) ** 2)))
 
 
 def wmape(y_true, y_pred) -> float:
+    """Считает WMAPE, основную метрику проекта для спроса с частыми нулевыми продажами."""
     actual, forecast = _to_arrays(y_true, y_pred)
+    numerator = np.sum(np.abs(actual - forecast))
     denominator = np.sum(np.abs(actual))
     if denominator == 0:
-        return float("nan")
-    return float(np.sum(np.abs(actual - forecast)) / denominator)
+        return 0.0 if numerator == 0 else 1.0
+    return float(numerator / denominator)
 
 
 def forecast_bias(y_true, y_pred) -> float:
+    """Показывает систематическое завышение или занижение прогноза."""
     actual, forecast = _to_arrays(y_true, y_pred)
-    denominator = np.sum(actual)
+    bias_sum = np.sum(forecast - actual)
+    denominator = np.sum(np.abs(actual))
     if denominator == 0:
-        return float("nan")
-    return float(np.sum(forecast - actual) / denominator)
+        if bias_sum == 0:
+            return 0.0
+        return float(np.sign(bias_sum))
+    return float(bias_sum / denominator)
+
+
+def service_level_proxy(y_true, y_pred) -> float:
+    """Оценивает долю строк, где прогноз покрывает фактический спрос."""
+    actual, forecast = _to_arrays(y_true, y_pred)
+    if actual.size == 0:
+        return 0.0
+    return float(np.mean(forecast >= actual))
+
+
+def stockout_risk_rate(y_true, y_pred, threshold: float = 0.0) -> float:
+    """Считает долю строк, где недопрогноз превышает заданный порог."""
+    actual, forecast = _to_arrays(y_true, y_pred)
+    if actual.size == 0:
+        return 0.0
+    return float(np.mean((actual - forecast) > threshold))
 
 
 def metrics_table(y_true, y_pred) -> pd.DataFrame:
+    """Возвращает таблицу метрик качества прогноза."""
     return pd.DataFrame(
         [
-            {"metric": "WMAPE", "value": wmape(y_true, y_pred)},
-            {"metric": "MAE", "value": mae(y_true, y_pred)},
-            {"metric": "RMSE", "value": rmse(y_true, y_pred)},
-            {"metric": "Forecast bias", "value": forecast_bias(y_true, y_pred)},
+            {"metric": "wmape", "value": wmape(y_true, y_pred)},
+            {"metric": "mae", "value": mae(y_true, y_pred)},
+            {"metric": "rmse", "value": rmse(y_true, y_pred)},
+            {"metric": "bias", "value": forecast_bias(y_true, y_pred)},
+            {"metric": "service_level_proxy", "value": service_level_proxy(y_true, y_pred)},
+            {"metric": "stockout_risk_rate", "value": stockout_risk_rate(y_true, y_pred, threshold=0)},
         ]
     )
-
