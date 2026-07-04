@@ -8,11 +8,15 @@ data/processed/*
 
 __pycache__/
 .ipynb_checkpoints/
+.pytest_cache/
 .env
 .venv/
 .DS_Store
+.idea/
+.coverage
+htmlcov/
+~$*
 
 results/*.parquet
 results/*.pkl
 models/
-
